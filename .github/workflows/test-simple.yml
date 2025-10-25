@@ -1,0 +1,15 @@
+name: Simple Test Workflow
+
+on:
+  workflow_call:
+    inputs:
+      test_message:
+        required: true
+        type: string
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Echo message
+        run: echo "Test message: ${{ inputs.test_message }}"
