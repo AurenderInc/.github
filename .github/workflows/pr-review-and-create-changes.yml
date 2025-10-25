@@ -83,7 +83,7 @@ jobs:
           Keep both versions clear, concise, and structured in Markdown format.
 
           Diff:
-          {diff[:15000]}
+          {diff}
           """
 
           summary_resp = openai.chat.completions.create(
@@ -154,11 +154,6 @@ jobs:
               patch = file.get('patch', '')
               is_binary = file.get('binary', False)
               
-              # API 비용 절감: 최대 10개 파일만 리뷰
-              if reviewed_count >= 10:
-                  print(f"⚠️  Reached review limit (10 files)")
-                  break
-              
               print(f"🔍 Reviewing: {filename}")
               reviewed_count += 1
               
@@ -221,7 +216,7 @@ jobs:
 
               File: {filename}
               Changes:
-              {patch[:4000]}
+              {patch}
               """
 
               try:
