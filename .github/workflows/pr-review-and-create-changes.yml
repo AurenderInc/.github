@@ -1,31 +1,8 @@
 name: PR Change Summary & Code Review (OpenAI)
 
 on:
-  workflow_call:
-    inputs:
-      pr_number:
-        required: true
-        type: number
-      pr_title:
-        required: true
-        type: string
-      base_ref:
-        required: true
-        type: string
-      head_ref:
-        required: true
-        type: string
-      commit_sha:
-        required: true
-        type: string
-      repo:
-        required: true
-        type: string
-    secrets:
-      OPENAI_API_KEY:
-        required: true
-      GITHUB_TOKEN:
-        required: true
+  pull_request:
+    types: [opened, synchronize]
 
 jobs:
   summarize-and-review:
@@ -38,7 +15,7 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.head_ref }}
+          ref: ${{ github.head_ref }}
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -55,12 +32,12 @@ jobs:
         run: |
           echo "date=$(date +'%Y.%m.%d')" >> $GITHUB_OUTPUT
           echo "sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
-          title=$(echo "${{ inputs.pr_title }}" | tr ' ' '-' | tr -cd '[:alnum:]-')
+          title=$(echo "${{ github.event.pull_request.title }}" | tr ' ' '-' | tr -cd '[:alnum:]-')
           echo "title=${title}" >> $GITHUB_OUTPUT
 
       - name: Extract diff
         env:
-          BASE_BRANCH: ${{ inputs.base_ref }}
+          BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
         run: |
           echo "📌 Base branch: $BASE_BRANCH"
           git fetch origin $BASE_BRANCH
@@ -73,9 +50,9 @@ jobs:
           date: ${{ steps.info.outputs.date }}
           sha: ${{ steps.info.outputs.sha }}
           title: ${{ steps.info.outputs.title }}
-          PR_NUMBER: ${{ inputs.pr_number }}
-          REPO: ${{ inputs.repo }}
-          COMMIT_SHA: ${{ inputs.commit_sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          COMMIT_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           python - <<'PYCODE'
           import os, openai, pathlib, requests, json, re
@@ -106,7 +83,7 @@ jobs:
           Keep both versions clear, concise, and structured in Markdown format.
 
           Diff:
-          {diff}
+          {diff[:15000]}
           """
 
           summary_resp = openai.chat.completions.create(
@@ -177,6 +154,11 @@ jobs:
               patch = file.get('patch', '')
               is_binary = file.get('binary', False)
               
+              # API 비용 절감: 최대 10개 파일만 리뷰
+              if reviewed_count >= 10:
+                  print(f"⚠️  Reached review limit (10 files)")
+                  break
+              
               print(f"🔍 Reviewing: {filename}")
               reviewed_count += 1
               
@@ -239,7 +221,7 @@ jobs:
 
               File: {filename}
               Changes:
-              {patch}
+              {patch[:4000]}
               """
 
               try:
