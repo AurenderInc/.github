@@ -1,8 +1,12 @@
 name: PR Change Summary & Code Review (OpenAI)
 
 on:
-  pull_request:
-    types: [opened, synchronize]
+  workflow_call:
+    secrets:
+      OPENAI_API_KEY:
+        required: true
+      GITHUB_TOKEN:
+        required: true
 
 jobs:
   summarize-and-review:
