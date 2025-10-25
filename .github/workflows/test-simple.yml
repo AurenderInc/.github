@@ -12,4 +12,4 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Echo message
-        run: echo "Test message: ${{ inputs.test_message }}"
+        run: echo 'Test message - ${{ inputs.test_message }}'
