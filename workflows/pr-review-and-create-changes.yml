@@ -1,0 +1,279 @@
+name: PR Change Summary & Code Review (OpenAI)
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  summarize-and-review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install openai requests
+
+      - name: Get commit info
+        id: info
+        run: |
+          echo "date=$(date +'%Y.%m.%d')" >> $GITHUB_OUTPUT
+          echo "sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          title=$(echo "${{ github.event.pull_request.title }}" | tr ' ' '-' | tr -cd '[:alnum:]-')
+          echo "title=${title}" >> $GITHUB_OUTPUT
+
+      - name: Extract diff
+        env:
+          BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
+        run: |
+          echo "📌 Base branch: $BASE_BRANCH"
+          git fetch origin $BASE_BRANCH
+          git diff origin/$BASE_BRANCH...HEAD > diff.patch
+
+      - name: AI Summary & File-by-File Review
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          date: ${{ steps.info.outputs.date }}
+          sha: ${{ steps.info.outputs.sha }}
+          title: ${{ steps.info.outputs.title }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          COMMIT_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python - <<'PYCODE'
+          import os, openai, pathlib, requests, json, re
+
+          openai.api_key = os.environ["OPENAI_API_KEY"]
+          github_token = os.environ["GITHUB_TOKEN"]
+          repo = os.environ["REPO"]
+          pr_number = os.environ["PR_NUMBER"]
+          commit_sha = os.environ["COMMIT_SHA"]
+
+          diff = open("diff.patch").read()
+          if not diff.strip():
+              print("⚠️ No diff to summarize.")
+              exit(0)
+
+          # ========================================
+          # 1. 전체 요약 생성 (기존 기능)
+          # ========================================
+          print("📝 Generating summary...")
+          summary_prompt = f"""
+          You are a senior software engineer reviewing a Git diff.
+          Analyze the following diff and produce TWO sections:
+          1. Korean summary titled "🧠 변경 요약 (Korean)"  
+             - Summarize in fluent professional Korean.  
+             - Include sections: 개요, 변경 파일, 주요 변경 내용, 영향 및 리스크.
+          2. English summary titled "💬 Change Summary (English)"  
+             - Include sections: Overview, Changed Files, Key Changes, Impact/Risks.
+          Keep both versions clear, concise, and structured in Markdown format.
+
+          Diff:
+          {diff[:15000]}
+          """
+
+          summary_resp = openai.chat.completions.create(
+              model="gpt-4o-mini",
+              messages=[{"role": "user", "content": summary_prompt}]
+          )
+          summary = summary_resp.choices[0].message.content.strip()
+
+          # 요약 파일 저장
+          date = os.getenv("date")
+          sha = os.getenv("sha")
+          title = os.getenv("title")
+          filename = f"changes/{date}-{sha}-{title}.md"
+
+          pathlib.Path("changes").mkdir(exist_ok=True)
+          with open(filename, "w") as f:
+              f.write(summary)
+
+          # index.md 업데이트
+          index_path = pathlib.Path("changes/index.md")
+          link_line = f"- [{date} {title}](./{date}-{sha}-{title}.md)"
+
+          if index_path.exists():
+              lines = index_path.read_text().splitlines()
+          else:
+              lines = ["# Change Index", ""]
+
+          if link_line not in lines:
+              lines.append(link_line)
+
+          header, items = lines[0], [l for l in lines[1:] if l.strip()]
+          items_sorted = sorted(items, key=lambda x: x.split()[1] if len(x.split()) > 1 else "", reverse=True)
+
+          index_path.write_text("\n".join([header, ""] + items_sorted) + "\n")
+          print(f"✅ Summary created: {filename}")
+
+          # ========================================
+          # 2. 파일별 상세 리뷰 (신규 기능)
+          # ========================================
+          print("\n🔍 Starting file-by-file code review...")
+          
+          headers = {
+              "Authorization": f"token {github_token}",
+              "Accept": "application/vnd.github.v3+json"
+          }
+
+          # PR의 변경된 파일 목록 가져오기
+          files_url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}/files"
+          files_resp = requests.get(files_url, headers=headers)
+          
+          if files_resp.status_code != 200:
+              print(f"❌ Failed to fetch files: {files_resp.status_code}")
+              exit(0)
+          
+          files = files_resp.json()
+          file_reviews = []
+
+          # 리뷰할 파일 확장자 필터
+          reviewable_extensions = ['.py', '.js', '.ts', '.tsx', '.jsx', '.java', '.go', '.rb', '.php', '.c', '.cpp', '.cs', '.yaml', '.yml', '.json']
+
+          reviewed_count = 0
+          for file in files:
+              # 삭제된 파일이나 바이너리 파일 스킵
+              if file['status'] == 'removed' or file.get('binary'):
+                  continue
+              
+              filename = file['filename']
+              patch = file.get('patch', '')
+              
+              if not patch:
+                  continue
+
+              # 확장자 체크
+              if not any(filename.endswith(ext) for ext in reviewable_extensions):
+                  print(f"⏭️  Skipping {filename} (not reviewable extension)")
+                  continue
+
+              # API 비용 절감: 최대 10개 파일만 리뷰
+              if reviewed_count >= 10:
+                  print(f"⚠️  Reached review limit (10 files)")
+                  break
+
+              print(f"🔍 Reviewing: {filename}")
+              reviewed_count += 1
+
+              # 파일별 AI 리뷰 요청
+              review_prompt = f"""
+              You are an expert code reviewer. Review this file change carefully.
+
+              Provide a structured review in Korean with these sections:
+
+              ### 📋 파일 개요
+              - 이 파일의 주요 변경사항을 1-2문장으로 요약
+
+              ### ✅ 잘된 점
+              - 좋은 코딩 관행이나 개선사항 (있다면)
+
+              ### 🐛 발견된 이슈
+              - 버그, 잠재적 문제, 에러 처리 누락 등
+              - 각 이슈마다 심각도 표시: [CRITICAL], [WARNING], [INFO]
+
+              ### 💡 개선 제안
+              - 성능, 가독성, 유지보수성 개선 방안
+
+              ### 🔒 보안 고려사항
+              - 보안 취약점 (있다면)
+
+              Be specific and constructive. Use code examples if helpful.
+              If there are no issues, be encouraging but still provide valuable insights.
+
+              File: {filename}
+              Changes:
+              {patch[:4000]}
+              """
+
+              try:
+                  review_resp = openai.chat.completions.create(
+                      model="gpt-4o-mini",
+                      messages=[{"role": "user", "content": review_prompt}],
+                      temperature=0.3
+                  )
+                  
+                  review_text = review_resp.choices[0].message.content.strip()
+                  
+                  file_reviews.append({
+                      "filename": filename,
+                      "review": review_text,
+                      "additions": file.get('additions', 0),
+                      "deletions": file.get('deletions', 0)
+                  })
+                  
+                  print(f"  ✅ Review completed for {filename}")
+              
+              except Exception as e:
+                  print(f"  ❌ Error reviewing {filename}: {e}")
+                  continue
+
+          # ========================================
+          # 3. 리뷰 결과를 PR에 코멘트로 작성
+          # ========================================
+          if file_reviews:
+              print(f"\n💬 Posting review for {len(file_reviews)} files...")
+              
+              # 전체 리뷰 코멘트 구성
+              review_body = "## 🤖 AI Code Review\n\n"
+              review_body += f"**총 {len(file_reviews)}개 파일 리뷰 완료**\n\n"
+              review_body += "---\n\n"
+              
+              for file_review in file_reviews:
+                  review_body += f"## 📄 `{file_review['filename']}`\n"
+                  review_body += f"*+{file_review['additions']} -{file_review['deletions']}*\n\n"
+                  review_body += f"{file_review['review']}\n\n"
+                  review_body += "---\n\n"
+              
+              review_body += "\n*🔮 This review was automatically generated by OpenAI GPT-4o-mini.*\n"
+              review_body += "*Please verify all suggestions before applying changes.*"
+
+              # PR에 코멘트 작성
+              comment_url = f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments"
+              comment_resp = requests.post(
+                  comment_url,
+                  headers=headers,
+                  json={"body": review_body}
+              )
+              
+              if comment_resp.status_code == 201:
+                  print(f"✅ Code review posted to PR!")
+              else:
+                  print(f"❌ Failed to post review: {comment_resp.status_code}")
+                  print(comment_resp.text)
+          else:
+              print("⚠️ No files to review (or all files were skipped)")
+
+          print("\n🎉 All tasks completed!")
+          PYCODE
+
+      - name: Commit and push summary + index
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add changes/
+          if git diff --staged --quiet; then
+            echo "📭 No changes to commit"
+          else
+            git commit -m "chore: add bilingual AI summary and update index [skip ci]"
+            git push
+          fi
+
+      - name: Comment index.md to PR
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: "🧾 Change Index"
+          path: changes/index.md
