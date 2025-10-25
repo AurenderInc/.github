@@ -2,6 +2,22 @@ name: PR Change Summary & Code Review (OpenAI)
 
 on:
   workflow_call:
+    inputs:
+      pr_number:
+        required: true
+        type: number
+      pr_title:
+        required: true
+        type: string
+      pr_head_ref:
+        required: true
+        type: string
+      pr_base_ref:
+        required: true
+        type: string
+      repo:
+        required: true
+        type: string
     secrets:
       OPENAI_API_KEY:
         required: true
@@ -19,7 +35,7 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.head_ref }}
+          ref: ${{ inputs.pr_head_ref }}
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -36,12 +52,12 @@ jobs:
         run: |
           echo "date=$(date +'%Y.%m.%d')" >> $GITHUB_OUTPUT
           echo "sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
-          title=$(echo "${{ github.event.pull_request.title }}" | tr ' ' '-' | tr -cd '[:alnum:]-')
+          title=$(echo "${{ inputs.pr_title }}" | tr ' ' '-' | tr -cd '[:alnum:]-')
           echo "title=${title}" >> $GITHUB_OUTPUT
 
       - name: Extract diff
         env:
-          BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
+          BASE_BRANCH: ${{ inputs.pr_base_ref }}
         run: |
           echo "📌 Base branch: $BASE_BRANCH"
           git fetch origin $BASE_BRANCH
@@ -54,9 +70,9 @@ jobs:
           date: ${{ steps.info.outputs.date }}
           sha: ${{ steps.info.outputs.sha }}
           title: ${{ steps.info.outputs.title }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          REPO: ${{ github.repository }}
-          COMMIT_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          REPO: ${{ inputs.repo }}
+          COMMIT_SHA: ${{ github.sha }}
         run: |
           python - <<'PYCODE'
           import os, openai, pathlib, requests, json, re
