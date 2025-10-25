@@ -45,11 +45,9 @@ jobs:
       - name: Install dependencies
         run: pip install openai requests
 
-      - name: Get commit info
+      - name: Get PR title for filename
         id: info
         run: |
-          echo "date=$(date +'%Y.%m.%d')" >> $GITHUB_OUTPUT
-          echo "sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
           title=$(echo "${{ inputs.pr_title }}" | tr ' ' '-' | tr -cd '[:alnum:]-')
           echo "title=${title}" >> $GITHUB_OUTPUT
 
@@ -65,8 +63,6 @@ jobs:
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          date: ${{ steps.info.outputs.date }}
-          sha: ${{ steps.info.outputs.sha }}
           title: ${{ steps.info.outputs.title }}
           PR_NUMBER: ${{ inputs.pr_number }}
           REPO: ${{ inputs.repo }}
@@ -110,11 +106,9 @@ jobs:
           )
           summary = summary_resp.choices[0].message.content.strip()
 
-          # 요약 파일 저장
-          date = os.getenv("date")
-          sha = os.getenv("sha")
+          # 요약 파일 저장 (PR당 하나의 파일)
           title = os.getenv("title")
-          filename = f"changes/{date}-{sha}-{title}.md"
+          filename = f"changes/PR-{pr_number}-{title}.md"
 
           pathlib.Path("changes").mkdir(exist_ok=True)
           with open(filename, "w") as f:
@@ -122,7 +116,7 @@ jobs:
 
           # index.md 업데이트
           index_path = pathlib.Path("changes/index.md")
-          link_line = f"- [{date} {title}](./{date}-{sha}-{title}.md)"
+          link_line = f"- [PR #{pr_number}: {title}](./PR-{pr_number}-{title}.md)"
 
           if index_path.exists():
               lines = index_path.read_text().splitlines()
@@ -133,7 +127,8 @@ jobs:
               lines.append(link_line)
 
           header, items = lines[0], [l for l in lines[1:] if l.strip()]
-          items_sorted = sorted(items, key=lambda x: x.split()[1] if len(x.split()) > 1 else "", reverse=True)
+          # PR 번호 기준으로 역순 정렬
+          items_sorted = sorted(items, key=lambda x: int(x.split('#')[1].split(':')[0]) if '#' in x and ':' in x else 0, reverse=True)
 
           index_path.write_text("\n".join([header, ""] + items_sorted) + "\n")
           print(f"✅ Summary created: {filename}")
