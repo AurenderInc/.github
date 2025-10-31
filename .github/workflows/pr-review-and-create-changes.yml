@@ -45,12 +45,6 @@ jobs:
       - name: Install dependencies
         run: pip install openai requests
 
-      - name: Get PR title for filename
-        id: info
-        run: |
-          title=$(echo "${{ inputs.pr_title }}" | tr ' ' '-' | tr -cd '[:alnum:]-')
-          echo "title=${title}" >> $GITHUB_OUTPUT
-
       - name: Extract diff
         env:
           BASE_BRANCH: ${{ inputs.pr_base_ref }}
@@ -63,24 +57,70 @@ jobs:
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          title: ${{ steps.info.outputs.title }}
+          PR_TITLE: ${{ inputs.pr_title }}
           PR_NUMBER: ${{ inputs.pr_number }}
           REPO: ${{ inputs.repo }}
           COMMIT_SHA: ${{ github.sha }}
         run: |
           python - <<'PYCODE'
           import os, openai, pathlib, requests, json, re
+          from datetime import datetime
 
           openai.api_key = os.environ["OPENAI_API_KEY"]
           github_token = os.environ["GITHUB_TOKEN"]
           repo = os.environ["REPO"]
           pr_number = os.environ["PR_NUMBER"]
+          pr_title = os.environ["PR_TITLE"]
           commit_sha = os.environ["COMMIT_SHA"]
 
           diff = open("diff.patch").read()
           if not diff.strip():
               print("⚠️ No diff to summarize.")
               exit(0)
+
+          # GitHub API 헤더
+          headers = {
+              "Authorization": f"token {github_token}",
+              "Accept": "application/vnd.github.v3+json"
+          }
+
+          # PR 정보 가져오기 (작성자, 날짜, HEAD SHA)
+          pr_url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}"
+          pr_resp = requests.get(pr_url, headers=headers)
+          
+          if pr_resp.status_code == 200:
+              pr_data = pr_resp.json()
+              pr_author = pr_data['user']['login']
+              pr_created_at = datetime.strptime(pr_data['created_at'], "%Y-%m-%dT%H:%M:%SZ")
+              pr_date = pr_created_at.strftime("%Y.%m.%d")
+              pr_head_sha = pr_data['head']['sha'][:8]  # 짧은 SHA (8자리)
+          else:
+              print(f"⚠️ Failed to fetch PR info, using defaults")
+              pr_author = "unknown"
+              pr_date = datetime.now().strftime("%Y.%m.%d")
+              pr_head_sha = commit_sha[:8] if commit_sha else "unknown"
+
+          print(f"📅 PR Date: {pr_date}")
+          print(f"👤 PR Author: {pr_author}")
+          print(f"🔖 PR HEAD SHA: {pr_head_sha}")
+
+          # 파일명 생성 함수 (한글 지원)
+          def make_slug(text, max_length=50):
+              # 공백을 하이픈으로
+              text = text.replace(' ', '-')
+              # 파일시스템에서 안전하지 않은 문자 제거
+              # 알파벳, 숫자, 하이픈, 언더스코어, 한글(가-힣), 일본어(ぁ-ん ァ-ヶ), 중국어(一-龥) 허용
+              text = re.sub(r'[^\w\-가-힣ぁ-んァ-ヶ一-龥]', '', text)
+              # 연속된 하이픈 제거
+              text = re.sub(r'-+', '-', text)
+              # 앞뒤 하이픈 제거
+              text = text.strip('-')
+              # 너무 길면 자르기 (바이트 단위가 아닌 문자 단위)
+              if len(text) > max_length:
+                  text = text[:max_length]
+                  # 마지막이 하이픈으로 끝나면 제거
+                  text = text.rstrip('-')
+              return text if text else 'untitled'
 
           # ========================================
           # 1. 전체 요약 생성 (기존 기능)
@@ -106,20 +146,20 @@ jobs:
           )
           summary = summary_resp.choices[0].message.content.strip()
 
-          # 요약 파일 저장 (PR당 하나의 파일)
-          title = os.getenv("title")
-          filename = f"changes/PR-{pr_number}-{title}.md"
+          # 요약 파일 저장 (날짜-PR번호-SHA-제목-작성자 형식)
+          title_slug = make_slug(pr_title)
+          filename = f"changes/{pr_date}-PR-{pr_number}-{pr_head_sha}-{title_slug}-{pr_author}.md"
 
           pathlib.Path("changes").mkdir(exist_ok=True)
-          with open(filename, "w") as f:
+          with open(filename, "w", encoding='utf-8') as f:
               f.write(summary)
 
           # index.md 업데이트
           index_path = pathlib.Path("changes/index.md")
-          link_line = f"- [PR #{pr_number}: {title}](./PR-{pr_number}-{title}.md)"
+          link_line = f"- [PR #{pr_number}: {pr_title} (@{pr_author})](./{pr_date}-PR-{pr_number}-{pr_head_sha}-{title_slug}-{pr_author}.md)"
 
           if index_path.exists():
-              lines = index_path.read_text().splitlines()
+              lines = index_path.read_text(encoding='utf-8').splitlines()
           else:
               lines = ["# Change Index", ""]
 
@@ -130,18 +170,13 @@ jobs:
           # PR 번호 기준으로 역순 정렬
           items_sorted = sorted(items, key=lambda x: int(x.split('#')[1].split(':')[0]) if '#' in x and ':' in x else 0, reverse=True)
 
-          index_path.write_text("\n".join([header, ""] + items_sorted) + "\n")
+          index_path.write_text("\n".join([header, ""] + items_sorted) + "\n", encoding='utf-8')
           print(f"✅ Summary created: {filename}")
 
           # ========================================
           # 2. 파일별 상세 리뷰 (신규 기능)
           # ========================================
           print("\n🔍 Starting file-by-file code review...")
-          
-          headers = {
-              "Authorization": f"token {github_token}",
-              "Accept": "application/vnd.github.v3+json"
-          }
 
           # PR의 변경된 파일 목록 가져오기
           files_url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}/files"
@@ -155,7 +190,7 @@ jobs:
           file_reviews = []
 
           # 리뷰할 파일 확장자 필터
-          reviewable_extensions = ['.py', '.js', '.ts', '.tsx', .jsx', '.java', '.go', '.rb', '.php', '.c', '.cpp', '.cs', '.sh', '.yaml', '.yml', '.json']
+          reviewable_extensions = ['.py', '.js', '.ts', '.tsx', '.jsx', '.java', '.go', '.rb', '.php', '.c', '.cpp', '.cs', '.sh', '.yaml', '.yml', '.json']
           
           # 확장자 없는 리뷰 가능 파일명
           reviewable_filenames = ['install', 'Makefile', 'Dockerfile']
@@ -258,4 +293,62 @@ jobs:
                   print(f"  ✅ Review completed for {filename}")
               
               except Exception as e:
-                  print(f"  ❌ Error revi
+                  print(f"  ❌ Error reviewing {filename}: {e}")
+                  continue
+
+          # ========================================
+          # 3. 리뷰 결과를 파일로 저장 (sticky comment용)
+          # ========================================
+          if file_reviews:
+              print(f"\n💬 Preparing review for {len(file_reviews)} files...")
+              
+              # 전체 리뷰 코멘트 구성
+              review_body = "## 🤖 AI Code Review\n\n"
+              review_body += f"**총 {len(file_reviews)}개 파일 리뷰 완료**\n\n"
+              review_body += "---\n\n"
+              
+              for file_review in file_reviews:
+                  review_body += f"## 📄 `{file_review['filename']}`\n"
+                  review_body += f"*+{file_review['additions']} -{file_review['deletions']}*\n\n"
+                  review_body += f"{file_review['review']}\n\n"
+                  review_body += "---\n\n"
+              
+              review_body += "\n*🔮 This review was automatically generated by OpenAI GPT-4o-mini.*\n"
+              review_body += "*Please verify all suggestions before applying changes.*"
+              
+              # 임시 파일로 저장 (sticky comment에서 사용)
+              review_file = "pr-review.md"
+              with open(review_file, "w", encoding='utf-8') as f:
+                  f.write(review_body)
+              
+              print(f"✅ Review file created: {review_file}")
+          else:
+              print("⚠️ No files to review (or all files were skipped)")
+
+          print("\n🎉 All tasks completed!")
+          PYCODE
+
+      - name: Commit and push summary + index
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add changes/
+          if git diff --staged --quiet; then
+            echo "📭 No changes to commit"
+          else
+            git commit -m "chore: add bilingual AI summary and update index [skip ci]"
+            git push
+          fi
+
+      - name: Comment index.md to PR
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: "🧾 Change Index"
+          path: changes/index.md
+
+      - name: Comment code review to PR
+        uses: marocchino/sticky-pull-request-comment@v2
+        if: success()
+        with:
+          header: "🤖 AI Code Review"
+          path: pr-review.md
