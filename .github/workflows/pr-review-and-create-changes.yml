@@ -190,7 +190,7 @@ jobs:
           file_reviews = []
 
           # 리뷰할 파일 확장자 필터
-          reviewable_extensions = ['.py', '.js', '.ts', '.tsx', '.jsx', '.java', '.go', '.rb', '.php', '.c', '.cpp', '.cs', '.sh', '.yaml', '.yml', '.json']
+          reviewable_extensions = ['.py', '.dart', '.js', '.ts', '.tsx', '.jsx', '.java', '.go', '.rb', '.php', '.c', '.cpp', '.cs', '.sh', '.yaml', '.yml', '.json']
           
           # 확장자 없는 리뷰 가능 파일명
           reviewable_filenames = ['install', 'Makefile', 'Dockerfile']
