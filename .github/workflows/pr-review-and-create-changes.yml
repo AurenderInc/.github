@@ -51,7 +51,7 @@ jobs:
         run: |
           echo "📌 Base branch: $BASE_BRANCH"
           git fetch origin $BASE_BRANCH
-          git diff origin/$BASE_BRANCH...HEAD > diff.patch
+          git diff origin/$BASE_BRANCH...HEAD -- . ':!changes/' > diff.patch
 
       - name: AI Summary & File-by-File Review
         env:
@@ -200,8 +200,14 @@ jobs:
               # 삭제된 파일 스킵
               if file['status'] == 'removed':
                   continue
-              
+
               filename = file['filename']
+
+              # changes/ 폴더 파일 스킵
+              if filename.startswith('changes/'):
+                  print(f"⏭️  Skipping changes folder: {filename}")
+                  continue
+
               patch = file.get('patch', '')
               is_binary = file.get('binary', False)
               
