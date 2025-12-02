@@ -128,13 +128,15 @@ jobs:
           print("📝 Generating summary...")
           summary_prompt = f"""
           You are a senior software engineer reviewing a Git diff.
-          Analyze the following diff and produce TWO sections:
-          1. Korean summary titled "🧠 변경 요약 (Korean)"  
-             - Summarize in fluent professional Korean.  
-             - Include sections: 개요, 변경 파일, 주요 변경 내용, 영향 및 리스크.
-          2. English summary titled "💬 Change Summary (English)"  
-             - Include sections: Overview, Changed Files, Key Changes, Impact/Risks.
-          Keep both versions clear, concise, and structured in Markdown format.
+          Analyze the following diff and produce a summary in Korean.
+
+          Include these sections in professional Korean:
+          - 🧠 변경 요약: 전체 변경사항을 1-2문장으로 요약
+          - 📂 변경 파일: 변경된 파일 목록
+          - 🔑 주요 변경 내용: 중요한 변경사항을 상세히 설명
+          - ⚠️ 영향 및 리스크: 이 변경으로 인한 영향과 잠재적 리스크
+
+          Keep it clear, concise, and structured in Markdown format.
 
           Diff:
           {diff}
@@ -146,32 +148,40 @@ jobs:
           )
           summary = summary_resp.choices[0].message.content.strip()
 
-          # 요약 파일 저장 (날짜-PR번호-SHA-제목-작성자 형식)
+          # 요약 파일 저장 (날짜-PR번호-제목 형식, SHA 제외)
           title_slug = make_slug(pr_title)
-          filename = f"changes/{pr_date}-PR-{pr_number}-{pr_head_sha}-{title_slug}-{pr_author}.md"
+          filename = f"changes/{pr_date}-PR-{pr_number}-{title_slug}.md"
 
           pathlib.Path("changes").mkdir(exist_ok=True)
+
+          # 기존 파일이 있으면 덮어쓰기 (push마다 갱신)
           with open(filename, "w", encoding='utf-8') as f:
               f.write(summary)
 
+          print(f"✅ Summary created/updated: {filename}")
+
           # index.md 업데이트
           index_path = pathlib.Path("changes/index.md")
-          link_line = f"- [PR #{pr_number}: {pr_title} (@{pr_author})](./{pr_date}-PR-{pr_number}-{pr_head_sha}-{title_slug}-{pr_author}.md)"
+          link_line = f"- [PR #{pr_number}: {pr_title} (@{pr_author})](./{pr_date}-PR-{pr_number}-{title_slug}.md)"
 
           if index_path.exists():
               lines = index_path.read_text(encoding='utf-8').splitlines()
           else:
               lines = ["# Change Index", ""]
 
-          if link_line not in lines:
-              lines.append(link_line)
+          # 동일한 PR 번호의 기존 항목 제거 (갱신을 위해)
+          existing_lines = [l for l in lines[1:] if l.strip()]
+          filtered_lines = [l for l in existing_lines if f"PR #{pr_number}:" not in l]
 
-          header, items = lines[0], [l for l in lines[1:] if l.strip()]
+          # 새로운 링크 추가
+          filtered_lines.append(link_line)
+
+          header = lines[0]
           # PR 번호 기준으로 역순 정렬
-          items_sorted = sorted(items, key=lambda x: int(x.split('#')[1].split(':')[0]) if '#' in x and ':' in x else 0, reverse=True)
+          items_sorted = sorted(filtered_lines, key=lambda x: int(x.split('#')[1].split(':')[0]) if '#' in x and ':' in x else 0, reverse=True)
 
           index_path.write_text("\n".join([header, ""] + items_sorted) + "\n", encoding='utf-8')
-          print(f"✅ Summary created: {filename}")
+          print(f"✅ Index updated for PR #{pr_number}")
 
           # ========================================
           # 2. 파일별 상세 리뷰 (신규 기능)
