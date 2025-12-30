@@ -84,25 +84,31 @@ jobs:
               "Accept": "application/vnd.github.v3+json"
           }
 
-          # PR 정보 가져오기 (작성자, 날짜, HEAD SHA)
+          # PR 정보 가져오기 (작성자, 날짜, HEAD SHA, merged 상태)
           pr_url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}"
           pr_resp = requests.get(pr_url, headers=headers)
-          
+
           if pr_resp.status_code == 200:
               pr_data = pr_resp.json()
               pr_author = pr_data['user']['login']
               pr_created_at = datetime.strptime(pr_data['created_at'], "%Y-%m-%dT%H:%M:%SZ")
               pr_date = pr_created_at.strftime("%Y.%m.%d")
               pr_head_sha = pr_data['head']['sha'][:8]  # 짧은 SHA (8자리)
+              pr_merged = pr_data.get('merged', False)
+              pr_mergeable_state = pr_data.get('mergeable_state', 'unknown')
           else:
               print(f"⚠️ Failed to fetch PR info, using defaults")
               pr_author = "unknown"
               pr_date = datetime.now().strftime("%Y.%m.%d")
               pr_head_sha = commit_sha[:8] if commit_sha else "unknown"
+              pr_merged = False
+              pr_mergeable_state = 'unknown'
 
           print(f"📅 PR Date: {pr_date}")
           print(f"👤 PR Author: {pr_author}")
           print(f"🔖 PR HEAD SHA: {pr_head_sha}")
+          print(f"🔀 PR Merged: {pr_merged}")
+          print(f"📊 PR Mergeable State: {pr_mergeable_state}")
 
           # 파일명 생성 함수 (한글 지원)
           def make_slug(text, max_length=50):
@@ -123,65 +129,68 @@ jobs:
               return text if text else 'untitled'
 
           # ========================================
-          # 1. 전체 요약 생성 (기존 기능)
+          # 1. 전체 요약 생성 (머지 시에만 실행)
           # ========================================
-          print("📝 Generating summary...")
-          summary_prompt = f"""
-          You are a senior software engineer reviewing a Git diff.
-          Analyze the following diff and produce a summary in Korean.
+          if pr_merged:
+              print("📝 Generating summary (PR is merged)...")
+              summary_prompt = f"""
+              You are a senior software engineer reviewing a Git diff.
+              Analyze the following diff and produce a summary in Korean.
 
-          Include these sections in professional Korean:
-          - 🧠 변경 요약: 전체 변경사항을 1-2문장으로 요약
-          - 📂 변경 파일: 변경된 파일 목록
-          - 🔑 주요 변경 내용: 중요한 변경사항을 상세히 설명
-          - ⚠️ 영향 및 리스크: 이 변경으로 인한 영향과 잠재적 리스크
+              Include these sections in professional Korean:
+              - 🧠 변경 요약: 전체 변경사항을 1-2문장으로 요약
+              - 📂 변경 파일: 변경된 파일 목록
+              - 🔑 주요 변경 내용: 중요한 변경사항을 상세히 설명
+              - ⚠️ 영향 및 리스크: 이 변경으로 인한 영향과 잠재적 리스크
 
-          Keep it clear, concise, and structured in Markdown format.
+              Keep it clear, concise, and structured in Markdown format.
 
-          Diff:
-          {diff}
-          """
+              Diff:
+              {diff}
+              """
 
-          summary_resp = openai.chat.completions.create(
-              model="gpt-4o-mini",
-              messages=[{"role": "user", "content": summary_prompt}]
-          )
-          summary = summary_resp.choices[0].message.content.strip()
+              summary_resp = openai.chat.completions.create(
+                  model="gpt-4o-mini",
+                  messages=[{"role": "user", "content": summary_prompt}]
+              )
+              summary = summary_resp.choices[0].message.content.strip()
 
-          # 요약 파일 저장 (날짜-PR번호-제목 형식, SHA 제외)
-          title_slug = make_slug(pr_title)
-          filename = f"changes/{pr_date}-PR-{pr_number}-{title_slug}.md"
+              # 요약 파일 저장 (날짜-PR번호-제목 형식, SHA 제외)
+              title_slug = make_slug(pr_title)
+              filename = f"changes/{pr_date}-PR-{pr_number}-{title_slug}.md"
 
-          pathlib.Path("changes").mkdir(exist_ok=True)
+              pathlib.Path("changes").mkdir(exist_ok=True)
 
-          # 기존 파일이 있으면 덮어쓰기 (push마다 갱신)
-          with open(filename, "w", encoding='utf-8') as f:
-              f.write(summary)
+              # 기존 파일이 있으면 덮어쓰기 (push마다 갱신)
+              with open(filename, "w", encoding='utf-8') as f:
+                  f.write(summary)
 
-          print(f"✅ Summary created/updated: {filename}")
+              print(f"✅ Summary created/updated: {filename}")
 
-          # index.md 업데이트
-          index_path = pathlib.Path("changes/index.md")
-          link_line = f"- [PR #{pr_number}: {pr_title} (@{pr_author})](./{pr_date}-PR-{pr_number}-{title_slug}.md)"
+              # index.md 업데이트
+              index_path = pathlib.Path("changes/index.md")
+              link_line = f"- [PR #{pr_number}: {pr_title} (@{pr_author})](./{pr_date}-PR-{pr_number}-{title_slug}.md)"
 
-          if index_path.exists():
-              lines = index_path.read_text(encoding='utf-8').splitlines()
+              if index_path.exists():
+                  lines = index_path.read_text(encoding='utf-8').splitlines()
+              else:
+                  lines = ["# Change Index", ""]
+
+              # 동일한 PR 번호의 기존 항목 제거 (갱신을 위해)
+              existing_lines = [l for l in lines[1:] if l.strip()]
+              filtered_lines = [l for l in existing_lines if f"PR #{pr_number}:" not in l]
+
+              # 새로운 링크 추가
+              filtered_lines.append(link_line)
+
+              header = lines[0]
+              # PR 번호 기준으로 역순 정렬
+              items_sorted = sorted(filtered_lines, key=lambda x: int(x.split('#')[1].split(':')[0]) if '#' in x and ':' in x else 0, reverse=True)
+
+              index_path.write_text("\n".join([header, ""] + items_sorted) + "\n", encoding='utf-8')
+              print(f"✅ Index updated for PR #{pr_number}")
           else:
-              lines = ["# Change Index", ""]
-
-          # 동일한 PR 번호의 기존 항목 제거 (갱신을 위해)
-          existing_lines = [l for l in lines[1:] if l.strip()]
-          filtered_lines = [l for l in existing_lines if f"PR #{pr_number}:" not in l]
-
-          # 새로운 링크 추가
-          filtered_lines.append(link_line)
-
-          header = lines[0]
-          # PR 번호 기준으로 역순 정렬
-          items_sorted = sorted(filtered_lines, key=lambda x: int(x.split('#')[1].split(':')[0]) if '#' in x and ':' in x else 0, reverse=True)
-
-          index_path.write_text("\n".join([header, ""] + items_sorted) + "\n", encoding='utf-8')
-          print(f"✅ Index updated for PR #{pr_number}")
+              print("⏭️  Skipping summary generation (PR not merged yet)")
 
           # ========================================
           # 2. 파일별 상세 리뷰 (신규 기능)
@@ -341,10 +350,15 @@ jobs:
           else:
               print("⚠️ No files to review (or all files were skipped)")
 
+          # 머지 상태를 환경 파일에 기록 (다음 step에서 사용)
+          with open(os.environ.get('GITHUB_ENV', '/dev/null'), 'a') as f:
+              f.write(f"PR_IS_MERGED={'true' if pr_merged else 'false'}\n")
+
           print("\n🎉 All tasks completed!")
           PYCODE
 
       - name: Commit and push summary + index
+        if: env.PR_IS_MERGED == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -352,11 +366,12 @@ jobs:
           if git diff --staged --quiet; then
             echo "📭 No changes to commit"
           else
-            git commit -m "chore: add bilingual AI summary and update index [skip ci]"
+            git commit -m "chore: add AI summary and update index [skip ci]"
             git push
           fi
 
       - name: Comment index.md to PR
+        if: env.PR_IS_MERGED == 'true'
         uses: marocchino/sticky-pull-request-comment@v2
         with:
           header: "🧾 Change Index"
