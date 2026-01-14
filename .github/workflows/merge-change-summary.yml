@@ -1,0 +1,227 @@
+name: Merge Change Summary (Base Branch)
+
+on:
+  push:
+    branches:
+      - 'aurender/**'
+      - 'main'
+      - 'master'
+      - 'auMpd'
+      - 'auMpd/**'
+    paths-ignore:
+      - 'changes/**'
+
+jobs:
+  create-merge-summary:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install openai requests
+
+      - name: Extract commit changes and create summary
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          COMMIT_SHA: ${{ github.sha }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          python - <<'PYCODE'
+          import os, openai, pathlib, requests, json, re, subprocess
+          from datetime import datetime
+
+          openai.api_key = os.environ["OPENAI_API_KEY"]
+          github_token = os.environ["GITHUB_TOKEN"]
+          repo = os.environ["REPO"]
+          commit_sha = os.environ["COMMIT_SHA"]
+          branch = os.environ["BRANCH"]
+
+          # GitHub API 헤더
+          headers = {
+              "Authorization": f"token {github_token}",
+              "Accept": "application/vnd.github.v3+json"
+          }
+
+          # 커밋 정보 가져오기
+          commit_url = f"https://api.github.com/repos/{repo}/commits/{commit_sha}"
+          commit_resp = requests.get(commit_url, headers=headers)
+
+          if commit_resp.status_code != 200:
+              print(f"❌ Failed to fetch commit info: {commit_resp.status_code}")
+              exit(1)
+
+          commit_data = commit_resp.json()
+          author_name = commit_data['commit']['author']['name']
+          commit_message = commit_data['commit']['message']
+          commit_date = datetime.strptime(commit_data['commit']['author']['date'], "%Y-%m-%dT%H:%M:%SZ")
+          date_str = commit_date.strftime("%Y-%m-%d")
+
+          print(f"📅 Commit Date: {date_str}")
+          print(f"👤 Author: {author_name}")
+          print(f"💬 Commit Message: {commit_message}")
+
+          # 부모 커밋이 있는지 확인 (머지 커밋인지 체크)
+          parents = commit_data['parents']
+          if len(parents) < 2:
+              # 일반 커밋인 경우, 이전 커밋과 비교
+              if len(parents) == 0:
+                  print("⚠️ No parent commit found. Skipping.")
+                  exit(0)
+              base_sha = parents[0]['sha']
+          else:
+              # 머지 커밋인 경우, 첫 번째 부모와 비교
+              base_sha = parents[0]['sha']
+
+          print(f"🔖 Base SHA: {base_sha[:8]}")
+          print(f"🔖 Current SHA: {commit_sha[:8]}")
+
+          # 변경사항 추출 (changes 폴더 제외)
+          try:
+              result = subprocess.run(
+                  ['git', 'diff', f'{base_sha}..{commit_sha}', '--', '.:!changes/'],
+                  capture_output=True,
+                  text=True,
+                  check=False
+              )
+              diff = result.stdout
+          except Exception as e:
+              print(f"❌ Error extracting diff: {e}")
+              exit(1)
+
+          if not diff.strip():
+              print("⚠️ No changes found (excluding changes folder).")
+              exit(0)
+
+          print(f"📊 Diff size: {len(diff)} characters")
+
+          # 파일명 생성 함수 (한글 지원)
+          def make_slug(text, max_length=50):
+              # 공백을 하이픈으로
+              text = text.replace(' ', '-')
+              # 파일시스템에서 안전하지 않은 문자 제거
+              # 알파벳, 숫자, 하이픈, 언더스코어, 한글(가-힣), 일본어(ぁ-ん ァ-ヶ), 중국어(一-龥) 허용
+              text = re.sub(r'[^\w\-가-힣ぁ-んァ-ヶ一-龥]', '', text)
+              # 연속된 하이픈 제거
+              text = re.sub(r'-+', '-', text)
+              # 앞뒤 하이픈 제거
+              text = text.strip('-')
+              # 너무 길면 자르기 (바이트 단위가 아닌 문자 단위)
+              if len(text) > max_length:
+                  text = text[:max_length]
+                  # 마지막이 하이픈으로 끝나면 제거
+                  text = text.rstrip('-')
+              return text if text else 'untitled'
+
+          # 커밋 메시지에서 요약 추출 (첫 줄만 사용)
+          commit_summary = commit_message.split('\n')[0].strip()
+          summary_slug = make_slug(commit_summary, max_length=30)
+
+          # AI를 사용하여 변경사항 요약 생성 (한글)
+          print("📝 Generating summary with AI...")
+          summary_prompt = f"""
+          당신은 소프트웨어 엔지니어입니다. 다음 Git diff를 분석하여 한글로 변경사항 요약을 작성해주세요.
+
+          다음 섹션을 포함하여 전문적인 한글로 작성해주세요:
+          - 🧠 변경 요약: 전체 변경사항을 1-2문장으로 요약
+          - 📂 변경 파일: 변경된 파일 목록
+          - 🔑 주요 변경 내용: 중요한 변경사항을 상세히 설명
+          - ⚠️ 영향 및 리스크: 이 변경으로 인한 영향과 잠재적 리스크
+
+          명확하고 간결하며 구조화된 Markdown 형식으로 작성해주세요.
+          반드시 UTF-8 Unicode 형식의 한글로 작성해야 합니다.
+
+          Diff:
+          {diff}
+          """
+
+          try:
+              summary_resp = openai.chat.completions.create(
+                  model="gpt-4o-mini",
+                  messages=[{"role": "user", "content": summary_prompt}]
+              )
+              summary = summary_resp.choices[0].message.content.strip()
+          except Exception as e:
+              print(f"❌ Error generating summary: {e}")
+              # AI 실패 시 기본 요약 생성
+              summary = f"""# 변경 요약
+
+## 🧠 변경 요약
+커밋 메시지: {commit_message}
+
+## 📂 변경 파일
+변경사항이 감지되었습니다. (AI 요약 생성 실패)
+
+## 🔑 주요 변경 내용
+자세한 내용은 diff를 확인해주세요.
+
+## ⚠️ 영향 및 리스크
+수동으로 검토가 필요합니다.
+"""
+
+          # 파일명 생성: YYYY-MM-DD_AuthorName_CHANGE_SUMMARY.md
+          # AuthorName에서 특수문자 제거 및 파일명 안전하게 만들기
+          author_slug = make_slug(author_name, max_length=20)
+          filename = f"changes/{date_str}_{author_slug}_{summary_slug}.md"
+
+          # changes 폴더 생성
+          pathlib.Path("changes").mkdir(exist_ok=True)
+
+          # 파일 저장 (UTF-8 인코딩)
+          with open(filename, "w", encoding='utf-8') as f:
+              f.write(summary)
+
+          print(f"✅ Summary created: {filename}")
+
+          # index.md 업데이트
+          index_path = pathlib.Path("changes/index.md")
+          link_line = f"- [{date_str} {author_name}: {commit_summary}](./{date_str}_{author_slug}_{summary_slug}.md)"
+
+          if index_path.exists():
+              lines = index_path.read_text(encoding='utf-8').splitlines()
+          else:
+              lines = ["# Change Index", ""]
+
+          # 기존 항목 확인 (중복 방지)
+          existing_lines = [l for l in lines[1:] if l.strip()]
+          # 같은 날짜와 작성자, 같은 요약이면 스킵
+          if any(f"{date_str}_{author_slug}_{summary_slug}" in l for l in existing_lines):
+              print(f"⚠️ Duplicate entry found. Skipping index update.")
+          else:
+              # 새로운 링크 추가
+              existing_lines.append(link_line)
+              
+              header = lines[0]
+              # 날짜 기준으로 역순 정렬
+              items_sorted = sorted(existing_lines, key=lambda x: x.split('[')[1].split(' ')[0] if '[' in x else '', reverse=True)
+
+              index_path.write_text("\n".join([header, ""] + items_sorted) + "\n", encoding='utf-8')
+              print(f"✅ Index updated")
+
+          print("\n🎉 All tasks completed!")
+          PYCODE
+
+      - name: Commit and push summary
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add changes/
+          if git diff --staged --quiet; then
+            echo "📭 No changes to commit"
+          else
+            git commit -m "docs: add merge change summary [skip ci]"
+            git push
+          fi

@@ -20,6 +20,24 @@
 
 ---
 
+### [Merge Change Summary](./merge-change-summary.md)
+
+**요약**: Base 브랜치에 merge될 때마다 자동으로 실행되어, 머지된 커밋의 변경사항을 AI로 분석하고 한글로 요약한 문서를 생성합니다.
+
+**주요 기능**:
+- ✅ Base 브랜치 merge 시 자동 실행
+- ✅ 변경사항을 AI로 분석하여 한글 요약 생성
+- ✅ `changes/` 폴더에 문서 자동 저장
+- ✅ 파일명 형식: `YYYY-MM-DD_AuthorName_CHANGE_SUMMARY.md`
+- ✅ UTF-8 Unicode 형식의 한글 문서 생성
+- ✅ `changes/index.md` 자동 업데이트
+
+**사용 기술**: OpenAI GPT-4o-mini, Python, GitHub API
+
+**트리거**: Base 브랜치 `push` 이벤트 (aurender/**, main, master, auMpd 등)
+
+---
+
 ## 시작하기
 
 각 워크플로우 문서를 클릭하여 상세한 설명, 설정 방법, 사용 예시를 확인하세요.
